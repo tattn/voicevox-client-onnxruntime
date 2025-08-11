@@ -1,0 +1,114 @@
+name: Release XCFramework
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., 1.17.3)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Build XCFramework
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          chmod +x scripts/update_xcframework_bundle_id.sh
+          ./scripts/update_xcframework_bundle_id.sh "$VERSION"
+
+      - name: Get output filename
+        id: filename
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "filename=voicevox_onnxruntime-ios-xcframework-${VERSION}-modified.zip" >> $GITHUB_OUTPUT
+
+      - name: Check if release exists
+        id: check_release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release v$VERSION exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Release v$VERSION does not exist"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create release if not exists
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "v$VERSION" \
+            --title "Release v$VERSION" \
+            --notes "XCFramework for VOICEVOX ONNX Runtime v$VERSION with custom bundle ID" \
+            --draft=false \
+            --prerelease=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Delete existing asset if exists
+        if: steps.check_release.outputs.exists == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FILENAME="${{ steps.filename.outputs.filename }}"
+
+          # Get asset ID if it exists
+          ASSET_ID=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/releases/tags/v$VERSION \
+            --jq ".assets[] | select(.name == \"$FILENAME\") | .id" || true)
+
+          if [ -n "$ASSET_ID" ]; then
+            echo "Deleting existing asset with ID: $ASSET_ID"
+            gh api \
+              -X DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              /repos/${{ github.repository }}/releases/assets/$ASSET_ID
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload XCFramework to release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FILENAME="${{ steps.filename.outputs.filename }}"
+          gh release upload "v$VERSION" "$FILENAME" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Output summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FILENAME="${{ steps.filename.outputs.filename }}"
+          echo "### 🎉 Release Created/Updated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: v$VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Asset**: $FILENAME" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View Release](https://github.com/${{ github.repository }}/releases/tag/v$VERSION)" >> $GITHUB_STEP_SUMMARY
